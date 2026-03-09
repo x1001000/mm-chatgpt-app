@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect } from "react";
 import "./openai.d.ts";
 
 // Types
@@ -16,23 +16,71 @@ interface ChartReference {
   imageUrl: string;
 }
 
-// Hook to subscribe to OpenAI globals
 function useOpenAI() {
   const [theme, setTheme] = useState<"light" | "dark">(
-    window.openai?.theme || "light"
+    (window.openai?.theme as "light" | "dark") ||
+    (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light")
   );
-  const [toolOutput] = useState<ToolOutput | null>(() => {
-    return (window.openai?.toolOutput as ToolOutput) || null;
-  });
+  const [toolOutput, setToolOutput] = useState<ToolOutput | null>(null);
+  const loadedRef = { current: false };
+
+  const safeSet = (data: unknown) => {
+    if (loadedRef.current) return;
+    const d = (data as { structuredContent?: ToolOutput })?.structuredContent || data;
+    if (!d) return;
+    loadedRef.current = true;
+    setToolOutput(d as ToolOutput);
+  };
 
   useEffect(() => {
-    const handleGlobals = (event: CustomEvent) => {
-      if (event.detail?.theme) {
-        setTheme(event.detail.theme);
+    // 1. postMessage JSON-RPC 2.0 bridge (primary for first load)
+    const handleMessage = (event: MessageEvent) => {
+      const msg = event.data;
+      if (!msg) return;
+      if (msg.jsonrpc === "2.0" && msg.method === "ui/notifications/tool-result") {
+        safeSet(msg.params);
       }
     };
-    window.addEventListener("openai:set_globals", handleGlobals as EventListener);
-    return () => window.removeEventListener("openai:set_globals", handleGlobals as EventListener);
+    window.addEventListener("message", handleMessage);
+
+    // 2. openai:set_globals event
+    const handleGlobals = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      const output = detail?.globals?.toolOutput || detail?.toolOutput;
+      if (output) {
+        const t = detail?.globals?.theme || detail?.theme || "light";
+        setTheme(t);
+        safeSet(output);
+      }
+    };
+    window.addEventListener("openai:set_globals", handleGlobals);
+
+    // 3. Check window.openai.toolOutput (works on reload when data is pre-set)
+    const legacy = window.openai?.toolOutput;
+    if (legacy) safeSet(legacy);
+
+    // 4. Poll for window.openai.toolOutput (covers async injection)
+    let pollCount = 0;
+    const pollTimer = setInterval(() => {
+      if (loadedRef.current || pollCount > 600) { clearInterval(pollTimer); return; }
+      pollCount++;
+      const to = window.openai?.toolOutput;
+      if (to) { clearInterval(pollTimer); safeSet(to); }
+    }, 50);
+
+    // 5. ui/initialize handshake
+    window.parent.postMessage(
+      { jsonrpc: "2.0", id: "init-1", method: "ui/initialize",
+        params: { appInfo: { name: "macromicro-widget", version: "1.0.0" },
+                  appCapabilities: {}, protocolVersion: "2026-01-26" } },
+      "*"
+    );
+
+    return () => {
+      clearInterval(pollTimer);
+      window.removeEventListener("message", handleMessage);
+      window.removeEventListener("openai:set_globals", handleGlobals);
+    };
   }, []);
 
   return { theme, toolOutput };
@@ -47,10 +95,11 @@ function extractChartReferences(md: string): { content: string; charts: ChartRef
 
   // Pattern 1: * [Title](URL)\n[![alt](ImageURL)](URL)
   // Handles bullet point followed by image link on next line
-  const pattern1 = /\*\s*\[([^\]]+)\]\((https?:\/\/[^\)]+)\)\s*\n\s*\[!\[[^\]]*\]\((https?:\/\/[^\)]+)\)\]\(https?:\/\/[^\)]+\)/g;
+  // Uses (?:[^\[\]]|\[[^\]]*\])* to allow nested brackets like [Puell Multiple]
+  const pattern1 = /\*\s*\[((?:[^\[\]]|\[[^\]]*\])*)\]\((https?:\/\/[^\)]+)\)\s*\n\s*\[!\[(?:[^\[\]]|\[[^\]]*\])*\]\((https?:\/\/[^\)]+)\)\]\(https?:\/\/[^\)]+\)/g;
 
   // Pattern 2: Just the image link format [![alt](ImageURL)](URL) for standalone charts
-  const pattern2 = /\[!\[([^\]]*)\]\((https?:\/\/cdn\.macromicro\.me[^\)]+)\)\]\((https?:\/\/en\.macromicro\.me[^\)]+)\)/g;
+  const pattern2 = /\[!\[((?:[^\[\]]|\[[^\]]*\])*)\]\((https?:\/\/cdn\.macromicro\.me[^\)]+)\)\]\((https?:\/\/(?:en\.|www\.)?macromicro\.me[^\)]+)\)/g;
 
   let match;
   const seenUrls = new Set<string>();
@@ -86,12 +135,14 @@ function extractChartReferences(md: string): { content: string; charts: ChartRef
   // Remove the chart reference section from content
   let content = normalized;
   if (charts.length > 0) {
-    // Find "Data Sources" or "Further Reading" section and remove everything after
-    const sectionPattern = /\n+\*\*Data Sources[^*]*\*\*[\s\S]*$/i;
+    // Find reference section and remove everything after
+    // Matches: **Data Sources...**, **參考資料**, or similar headers near the end
+    const sectionPattern = /\n+(?:\*\*(?:Data Sources|Further Reading|參考資料)[^*]*\*\*|#{1,4}\s*(?:Data Sources|Further Reading|參考資料))[\s\S]*$/i;
     content = normalized.replace(sectionPattern, '');
     // Also remove any remaining standalone image links that were extracted
     for (const chart of charts) {
-      const imgPattern = new RegExp(`\\[!\\[[^\\]]*\\]\\(${chart.imageUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)\\]\\([^)]+\\)`, 'g');
+      const escapedUrl = chart.imageUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const imgPattern = new RegExp(`\\[!\\[(?:[^\\[\\]]|\\[[^\\]]*\\])*\\]\\(${escapedUrl}\\)\\]\\([^)]+\\)`, 'g');
       content = content.replace(imgPattern, '');
     }
   }
@@ -223,8 +274,8 @@ function parseMarkdown(md: string): string {
     .replace(/^# (.*$)/gm, '<h1 class="mm-h1">$1</h1>')
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="mm-link">$1</a>')
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="mm-img" />')
+    .replace(/!\[((?:[^\[\]]|\[[^\]]*\])*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="mm-img" />')
+    .replace(/\[((?:[^\[\]]|\[[^\]]*\])*)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="mm-link">$1</a>')
     .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="mm-pre"><code>$2</code></pre>')
     .replace(/`([^`]+)`/g, '<code class="mm-code">$1</code>')
     .replace(/^> (.*$)/gm, '<blockquote class="mm-quote">$1</blockquote>')
@@ -290,6 +341,24 @@ const cssStyles = `
   --mm-negative: #dc2626;
   --mm-error-bg: #fef2f2;
   --mm-error-text: #dc2626;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mm-bg: #212121;
+    --mm-bg-card: #2d2d2d;
+    --mm-bg-code: #3d3d3d;
+    --mm-text: #ececec;
+    --mm-text-secondary: #a0a0a0;
+    --mm-text-muted: #666666;
+    --mm-border: #404040;
+    --mm-accent: #4da6ff;
+    --mm-accent-hover: #80bfff;
+    --mm-positive: #4ade80;
+    --mm-negative: #f87171;
+    --mm-error-bg: #450a0a;
+    --mm-error-text: #fca5a5;
+  }
 }
 
 [data-theme="dark"] {
@@ -543,28 +612,13 @@ body {
 // Main Widget Component
 function MacroMicroWidget() {
   const { theme, toolOutput } = useOpenAI();
-  const containerRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  const notifyHeight = useCallback(() => {
-    if (containerRef.current && window.openai?.notifyIntrinsicHeight) {
-      window.openai.notifyIntrinsicHeight(containerRef.current.scrollHeight);
-    }
-  }, []);
-
-  useEffect(() => {
-    notifyHeight();
-    const observer = new ResizeObserver(notifyHeight);
-    if (containerRef.current) observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, [notifyHeight, toolOutput]);
-
   if (!toolOutput) {
     return (
-      <div className="mm-widget" ref={containerRef}>
+      <div className="mm-widget">
         <div className="mm-loading">Loading...</div>
       </div>
     );
@@ -578,7 +632,7 @@ function MacroMicroWidget() {
     : { content: '', charts: [] };
 
   return (
-    <div className="mm-widget" ref={containerRef}>
+    <div className="mm-widget">
       {/* Question */}
       {question && (
         <div className="mm-question">

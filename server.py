@@ -7,12 +7,12 @@ for ChatGPT Apps integration.
 
 import os
 import logging
-from functools import lru_cache
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
 
 # Configure logging
 logging.basicConfig(
@@ -37,7 +37,6 @@ mcp = FastMCP(
 logger.info("FastMCP server 'MacroMicro ChatGPT App' initialized")
 
 
-@lru_cache(maxsize=1)
 def _load_widget_html() -> str:
     """Load the widget HTML template with embedded React component."""
     widget_path = Path(__file__).parent / "web" / "dist" / "widget.html"
@@ -61,6 +60,17 @@ def _load_widget_html() -> str:
             --text-secondary: #6b6b6b;
             --border-color: #e5e5e5;
             --accent-color: #0066cc;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-primary: #1a1a1a;
+                --bg-secondary: #2d2d2d;
+                --text-primary: #ffffff;
+                --text-secondary: #a0a0a0;
+                --border-color: #404040;
+                --accent-color: #4da6ff;
+            }
         }
 
         [data-theme="dark"] {
@@ -312,6 +322,13 @@ def _load_widget_html() -> str:
     </div>
 
     <script>
+        // Detect theme immediately
+        (function() {
+            var theme = window.openai?.theme ||
+                (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+
         // Extract chart references with images from markdown (for RELATED CHARTS section)
         function extractChartReferences(md) {
             if (!md) return [];
@@ -323,7 +340,8 @@ def _load_widget_html() -> str:
                 const line = lines[i];
 
                 // Match: * [Title](url) or - [Title](url) where url contains macromicro.me
-                const linkMatch = line.match(/^\s*[\*\-]\s*\[([^\]]+)\]\((https?:\/\/[^)]*macromicro\.me[^)]+)\)/);
+                // Allows nested brackets like [Puell Multiple] in title
+                const linkMatch = line.match(/^\s*[\*\-]\s*\[((?:[^\[\]]|\[[^\]]*\])*)\]\((https?:\/\/[^)]*macromicro\.me[^)]+)\)/);
                 if (linkMatch) {
                     const ref = {
                         title: linkMatch[1],
@@ -334,7 +352,7 @@ def _load_widget_html() -> str:
                     // Check next line for image: [![alt](imageUrl)](url)
                     if (i + 1 < lines.length) {
                         const nextLine = lines[i + 1];
-                        const imgMatch = nextLine.match(/\[!\[[^\]]*\]\((https?:\/\/cdn\.macromicro\.me[^)]+)\)\]\([^)]+\)/);
+                        const imgMatch = nextLine.match(/\[!\[((?:[^\[\]]|\[[^\]]*\])*)\]\((https?:\/\/cdn\.macromicro\.me[^)]+)\)\]\([^)]+\)/);
                         if (imgMatch) {
                             ref.imageUrl = imgMatch[1];
                         }
@@ -356,7 +374,7 @@ def _load_widget_html() -> str:
 
             // Remove standalone image links that are chart previews from cdn.macromicro.me
             // Pattern: [![alt](cdn.macromicro.me/...)](url) on its own line
-            let cleaned = md.replace(/^\s*\[!\[[^\]]*\]\(https?:\/\/cdn\.macromicro\.me[^)]+\)\]\([^)]+\)\s*$/gm, '');
+            let cleaned = md.replace(/^\s*\[!\[((?:[^\[\]]|\[[^\]]*\])*)\]\(https?:\/\/cdn\.macromicro\.me[^)]+\)\]\([^)]+\)\s*$/gm, '');
 
             // Clean up multiple consecutive empty lines
             cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
@@ -379,10 +397,10 @@ def _load_widget_html() -> str:
                 .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                 // Italic
                 .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                // Links (but not image links)
-                .replace(/(?<!!)\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-                // Images
-                .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
+                // Images (must be before links; allows nested brackets like [Puell Multiple])
+                .replace(/!\[((?:[^\[\]]|\[[^\]]*\])*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
+                // Links
+                .replace(/\[((?:[^\[\]]|\[[^\]]*\])*)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
                 // Code blocks
                 .replace(/```[\w]*\n([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
                 // Inline code
@@ -445,23 +463,23 @@ def _load_widget_html() -> str:
             return html;
         }
 
-        // Initialize widget
-        function initWidget() {
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Render widget from structured content
+        function update(params) {
             const root = document.getElementById('root');
 
-            // Get theme from host
-            const theme = window.openai?.theme || 'light';
-            document.documentElement.setAttribute('data-theme', theme);
-
-            // toolOutput IS the structuredContent directly
-            const toolOutput = window.openai?.toolOutput;
-
-            if (!toolOutput) {
+            const data = params?.structuredContent || params;
+            if (!data) {
                 root.innerHTML = '<div class="error">No data available</div>';
                 return;
             }
 
-            const { question, markdown, summary } = toolOutput;
+            const { question, markdown, summary } = data;
 
             let html = '';
 
@@ -477,20 +495,15 @@ def _load_widget_html() -> str:
 
             // Parse markdown and extract references
             if (markdown) {
-                // Extract chart references (with images) for RELATED CHARTS section
                 const chartReferences = extractChartReferences(markdown);
-
-                // Remove preview images from content (keep text links intact)
                 const cleanedMarkdown = removeChartPreviewImages(markdown);
 
-                // Main content card (with original text, minus preview images)
                 html += `
                     <div class="content-card">
                         ${parseMarkdown(cleanedMarkdown)}
                     </div>
                 `;
 
-                // RELATED CHARTS section with image previews
                 if (chartReferences.length > 0) {
                     html += renderReferences(chartReferences);
                 }
@@ -503,31 +516,58 @@ def _load_widget_html() -> str:
             }
 
             root.innerHTML = html || '<div class="error">No content to display</div>';
+        }
 
-            // Notify host of height
-            if (window.openai?.notifyIntrinsicHeight) {
-                window.openai.notifyIntrinsicHeight(document.body.scrollHeight);
+        let loaded = false;
+        function safeUpdate(data) {
+            if (loaded) return;
+            const d = data?.structuredContent || data;
+            if (!d) return;
+            loaded = true;
+            update(d);
+        }
+
+        // 1. postMessage JSON-RPC 2.0 bridge
+        window.addEventListener("message", function(event) {
+            const msg = event.data;
+            if (!msg) return;
+            if (msg.jsonrpc === "2.0" && msg.method === "ui/notifications/tool-result") {
+                safeUpdate(msg.params);
             }
-        }
-
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        // Listen for theme changes
-        window.addEventListener('openai:set_globals', (event) => {
-            const theme = event.detail?.theme || 'light';
-            document.documentElement.setAttribute('data-theme', theme);
         });
 
-        // Initialize when ready
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initWidget);
-        } else {
-            initWidget();
-        }
+        // 2. openai:set_globals event
+        window.addEventListener("openai:set_globals", function(event) {
+            const d = event.detail;
+            const toolOutput = d?.globals?.toolOutput || d?.toolOutput;
+            if (toolOutput) {
+                const theme = d?.globals?.theme || d?.theme || 'light';
+                document.documentElement.setAttribute('data-theme', theme);
+                safeUpdate(toolOutput);
+            }
+        });
+
+        // 3. Check + poll window.openai.toolOutput
+        let pollCount = 0;
+        const pollTimer = setInterval(function() {
+            if (loaded || pollCount > 600) { clearInterval(pollTimer); return; }
+            pollCount++;
+            const to = window.openai?.toolOutput;
+            if (to) {
+                clearInterval(pollTimer);
+                const theme = window.openai?.theme || 'light';
+                document.documentElement.setAttribute('data-theme', theme);
+                safeUpdate(to);
+            }
+        }, 50);
+
+        // 4. ui/initialize handshake
+        window.parent.postMessage(
+            { jsonrpc: "2.0", id: "init-1", method: "ui/initialize",
+              params: { appInfo: { name: "macromicro-widget", version: "1.0.0" },
+                        appCapabilities: {}, protocolVersion: "2026-01-26" } },
+            "*"
+        );
     </script>
 </body>
 </html>"""
@@ -539,7 +579,7 @@ def _load_widget_html() -> str:
     uri="ui://widget/macromicro.html",
     name="MacroMicro Widget",
     description="UI widget for displaying MacroMicro financial analysis results",
-    mime_type="text/html+skybridge",
+    mime_type="text/html;profile=mcp-app",
 )
 def get_widget_template() -> str:
     """Return the widget HTML template."""
@@ -564,26 +604,27 @@ Args:
 Returns:
     Financial analysis displayed in a rich UI widget""",
     meta={
-        "openai/outputTemplate": "ui://widget/macromicro.html",
+        "ui": {"resourceUri": "ui://widget/macromicro.html"},
         "openai/toolInvocation/invoking": "Analyzing financial data...",
         "openai/toolInvocation/invoked": "Analysis complete",
     },
 )
-def ask_MacroMicro(question: str) -> dict:
+def ask_MacroMicro(question: str) -> ToolResult:
     """Query MacroMicro API and return structured content for widget rendering."""
     logger.info(f"ask_MacroMicro called with question: {question[:50]}...")
+
+    ui_meta = {"ui": {"resourceUri": "ui://widget/macromicro.html"}}
 
     # Get API endpoint from environment
     api_endpoint = os.getenv("MacroMicro_API")
 
     if not api_endpoint:
         logger.error("MacroMicro_API environment variable not set")
-        return {
-            "question": question,
-            "markdown": None,
-            "summary": "Error: MacroMicro API not configured.",
-            "error": True,
-        }
+        return ToolResult(
+            structured_content={"question": question, "markdown": None, "summary": "Error: MacroMicro API not configured.", "error": True},
+            content="Error: MacroMicro API not configured.",
+            meta=ui_meta,
+        )
 
     try:
         # Call MacroMicro API
@@ -605,32 +646,31 @@ def ask_MacroMicro(question: str) -> dict:
         # Generate a brief summary for the model
         summary_lines = markdown_response.split("\n")[:5]
         summary = " ".join(line.strip() for line in summary_lines if line.strip())[:200]
+        if len(summary) == 200:
+            summary += "..."
 
         # Return structured content for widget rendering
-        # The _meta is now in the tool decorator, not here
-        return {
-            "question": question,
-            "markdown": markdown_response,
-            "summary": summary + "..." if len(summary) == 200 else summary,
-        }
+        return ToolResult(
+            structured_content={"question": question, "markdown": markdown_response, "summary": summary},
+            content=f"Analysis of: {question}. {summary}",
+            meta=ui_meta,
+        )
 
     except requests.exceptions.Timeout:
         logger.error("Request to MacroMicro API timed out")
-        return {
-            "question": question,
-            "markdown": None,
-            "summary": "Request timed out. Please try again.",
-            "error": True,
-        }
+        return ToolResult(
+            structured_content={"question": question, "markdown": None, "summary": "Request timed out. Please try again.", "error": True},
+            content="Request timed out. Please try again.",
+            meta=ui_meta,
+        )
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error communicating with MacroMicro API: {str(e)}")
-        return {
-            "question": question,
-            "markdown": None,
-            "summary": f"Error: {str(e)}",
-            "error": True,
-        }
+        return ToolResult(
+            structured_content={"question": question, "markdown": None, "summary": f"Error: {str(e)}", "error": True},
+            content=f"Error: {str(e)}",
+            meta=ui_meta,
+        )
 
 
 logger.info("ask_MacroMicro tool registered")

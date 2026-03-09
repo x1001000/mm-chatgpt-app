@@ -6,7 +6,9 @@ A ChatGPT App that provides access to MacroMicro financial and economic data ana
 
 - **Financial Data Analysis**: Query MacroMicro for economic indicators, market trends, and financial insights
 - **Rich UI Widget**: Responses rendered with styled cards, tables, and formatted markdown
-- **Dark/Light Theme**: Automatically adapts to ChatGPT's theme
+- **Chart Gallery**: Related charts displayed as image cards in a scrollable carousel
+- **Dark/Light Theme**: Automatically adapts via `prefers-color-scheme`
+- **MCP Apps Bridge**: Uses JSON-RPC 2.0 postMessage protocol (`ui/initialize` + `ui/notifications/tool-result`)
 - **AWS Lambda Ready**: Stateless deployment for serverless hosting
 
 ## Project Structure
@@ -137,9 +139,11 @@ Query MacroMicro for financial and economic data.
 - `question` (string): Natural language question about financial data
 
 **Output:**
-- Rich UI widget displaying formatted response with:
+- `ToolResult` with `structuredContent` (question, markdown, summary) delivered to widget via MCP Apps bridge
+- Rich UI widget displaying:
   - Question card showing the original query
-  - Content card with styled markdown response
+  - Content card with styled markdown (tables, lists, links)
+  - Related Charts gallery with image previews from MacroMicro CDN
 
 ## Development
 
@@ -154,8 +158,21 @@ npm run watch
 
 Edit `web/src/MacroMicroWidget.tsx` to customize the UI appearance.
 
+## Architecture
+
+The widget communicates with ChatGPT via the MCP Apps bridge:
+
+1. ChatGPT calls the `ask_MacroMicro` tool
+2. Widget iframe loads from the `ui://widget/macromicro.html` resource
+3. Widget sends `ui/initialize` handshake via `postMessage`
+4. After tool completes, ChatGPT delivers `ui/notifications/tool-result` with `structuredContent`
+5. Widget renders the formatted response
+
+Resource MIME type: `text/html;profile=mcp-app`
+
 ## References
 
 - [OpenAI Apps SDK](https://developers.openai.com/apps-sdk/)
+- [Build MCP Server](https://developers.openai.com/apps-sdk/build/mcp-server)
 - [Build ChatGPT UI](https://developers.openai.com/apps-sdk/build/chatgpt-ui/)
 - [FastMCP](https://github.com/jlowin/fastmcp)
