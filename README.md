@@ -15,14 +15,16 @@ A ChatGPT App that provides access to MacroMicro financial and economic data ana
 
 ```
 mm-chatgpt-app/
-├── server.py              # FastMCP server with widget support
+├── server.py              # FastMCP server with widget support (includes inline fallback widget)
+├── main.py                # Python entry point (placeholder)
 ├── web/
 │   ├── package.json       # Node.js dependencies
 │   ├── tsconfig.json      # TypeScript config
 │   ├── build.mjs          # esbuild script
 │   ├── src/
 │   │   ├── MacroMicroWidget.tsx   # React widget component
-│   │   └── openai.d.ts    # TypeScript types for window.openai
+│   │   ├── widget.html            # Widget HTML template
+│   │   └── openai.d.ts           # TypeScript types for window.openai
 │   └── dist/
 │       └── widget.html    # Built widget (generated)
 ├── requirements.txt       # Python dependencies
